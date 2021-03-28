@@ -94,6 +94,7 @@ extern "C" {
 #define OFX_FFMPEG_PRORES 1       // experimental apple prores support
 #define OFX_FFMPEG_PRORES4444 1   // experimental apple prores 4444 support
 #define OFX_FFMPEG_DNXHD 1        // experimental DNxHD support (disactivated, because of unsolved color shifting issues)
+#define OFX_FFMPEG_NEW_API 1
 
 #if OFX_FFMPEG_PRINT_CODECS
 #include <iostream>
@@ -613,17 +614,25 @@ CreateCodecKnobLabelsMap()
     m["libschroedinger"] = "drac\tSMPTE VC-2 (previously BBC Dirac Pro)";
     m["libtheora"]     = "theo\tTheora";
     m["libvpx"]        = "VP80\tOn2 VP8"; // write doesn't work yet
+    m["vp8_vaapi"]     = "VP90\tOn2 VP8 [VA-API]";
     m["libvpx-vp9"]    = "VP90\tGoogle VP9"; // disabled in whitelist (bad quality)
+    m["vp9_vaapi"]     = "VP90\tGoogle VP9 [VA-API]";
     m["libx264"]       = "avc1\tH.264 / AVC / MPEG-4 AVC / MPEG-4 part 10";
     m["libx264rgb"]    = "avc1\tH.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 RGB";
+    m["h264_vaapi"]    = "avc1\tH.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 [VA-API]";
+    m["h264_nvenc"]    = "avc1\tH.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 [CUDA]";
     m["libx265"]       = "hev1\tH.265 / HEVC (High Efficiency Video Coding)"; // disabled in whitelist (does not work will all sizes)
+    m["hevc_vaapi"]    = "hev1\tH.265 / HEVC (High Efficiency Video Coding) [VA-API]";
+    m["hevc_nvenc"]    = "hev1\tH.265 / HEVC (High Efficiency Video Coding) [CUDA]";
     m["libxavs"]       = "CAVS\tChinese AVS (Audio Video Standard)"; //disabled in whitelist
 
     m["libxvid"]       = "mp4v\tMPEG-4 part 2";
     m["ljpeg"]         = "LJPG\tLossless JPEG"; // disabled in whitelist
     m["mjpeg"]         = "jpeg\tPhoto JPEG";
+    m["mjpeg_vaapi"]   = "jpeg\tPhoto JPEG [VA-API]";
     m["mpeg1video"]    = "m1v \tMPEG-1 Video"; // disabled in whitelist (random blocks)
     m["mpeg2video"]    = "m2v1\tMPEG-2 Video";
+    m["mpeg2_vaapi"]   = "m2v1\tMPEG-2 Video [VA-API]";
     m["mpeg4"]         = "mp4v\tMPEG-4 part 2";
     m["msmpeg4v2"]     = "MP42\tMPEG-4 part 2 Microsoft variant version 2";
     m["msmpeg4"]       = "3IVD\tMPEG-4 part 2 Microsoft variant version 3";
@@ -1288,6 +1297,7 @@ private:
     static AVPixelFormat  GetRGBPixelFormatFromBitDepth(const int bitDepth, const bool hasAlpha);
     static void           GetCodecSupportedParams(const AVCodec* codec, CodecParams* p);
 
+    int setHWFrameContext(AVCodecContext *ctx);
     void configureAudioStream(AVCodec* avCodec, AVStream* avStream);
     void configureVideoStream(AVCodec* avCodec, AVStream* avStream);
     void configureTimecodeStream(AVCodec* avCodec, AVStream* avStream);
@@ -1320,6 +1330,9 @@ private:
     AVFormatContext*  _formatContext;
     SwsContext* _convertCtx;
     AVStream* _streamVideo;
+    AVBufferRef* _hwDeviceContext;
+    enum AVPixelFormat _hwPixelFormat;
+    enum AVPixelFormat _swPixelFormat;
     AVStream* _streamAudio;
     AVStream* _streamTimecode;
     tthread::mutex _nextFrameToEncodeMutex;
@@ -1599,6 +1612,9 @@ WriteFFmpegPlugin::WriteFFmpegPlugin(OfxImageEffectHandle handle,
     , _formatContext(NULL)
     , _convertCtx(NULL)
     , _streamVideo(NULL)
+    , _hwDeviceContext(NULL)
+    , _hwPixelFormat(AV_PIX_FMT_NONE)
+    , _swPixelFormat(AV_PIX_FMT_NONE)
     , _streamAudio(NULL)
     , _streamTimecode(NULL)
     , _nextFrameToEncodeMutex()
@@ -1939,6 +1955,28 @@ WriteFFmpegPlugin::initCodec(AVOutputFormat* fmt,
         return false;
     }
 
+    if (outVideoCodec->capabilities & AV_CODEC_CAP_HARDWARE) {
+        enum AVHWDeviceType avHWDeviceType = av_hwdevice_find_type_by_name("vaapi"); // to be parametrized!!!
+        for (int c = 0 ; ; c++) {
+            int ret = 0;
+            const AVCodecHWConfig *avCodecHWConfig = avcodec_get_hw_config(outVideoCodec, c);
+            if (!avCodecHWConfig) {
+                break;
+            }
+            if (avCodecHWConfig->methods & AV_CODEC_HW_CONFIG_METHOD_HW_FRAMES_CTX &&
+                avCodecHWConfig->device_type == avHWDeviceType) {
+                if ((ret = av_hwdevice_ctx_create((AVBufferRef**)&_hwDeviceContext, avHWDeviceType,
+                                                  NULL, NULL, 0)) < 0) {
+                    continue;
+                 }
+#if OFX_FFMPEG_PRINT_CODECS
+                std::cout << "OK avcodec_get_hw_config: " << outVideoCodec->name << " c: " << c << std::endl;
+#endif
+                break;
+            }
+        }
+    }
+
     return true;
 }
 
@@ -1999,6 +2037,16 @@ WriteFFmpegPlugin::getPixelFormats(AVCodec* videoCodec,
         }
     } else
 #endif // FN_LICENSED_PRORES_CODEC
+    if (videoCodec->capabilities & AV_CODEC_CAP_HARDWARE) {
+        AVHWDeviceContext *hwDeviceCtx = (AVHWDeviceContext*)_hwDeviceContext->data;
+        switch (hwDeviceCtx->type) {
+            case AV_HWDEVICE_TYPE_VAAPI:
+                outTargetPixelFormat = AV_PIX_FMT_NV12;
+                break;
+            case AV_HWDEVICE_TYPE_CUDA:
+                break;
+        }
+    } else
     if (videoCodec->pix_fmts != NULL) {
         //This is the most frequent path, where we can guess best pix format using ffmpeg.
         //find highest bit depth pix fmt.
@@ -2302,6 +2350,28 @@ WriteFFmpegPlugin::GetCodecSupportedParams(const AVCodec* codec,
             p->qrange = false; // true; // the code uses it, but it's disturbing to have qmin/qmax with CRF
             p->interGOP = true;
             p->interB = true;
+        } else if (codecShortName == "h264_vaapi") {
+            // libx264.c
+            // https://trac.ffmpeg.org/wiki/Encode/H.264
+            p->crf = true;
+            p->x26xSpeed = true;
+            p->bitrate = true;
+            p->bitrateTol = false;
+            p->qscale = true;
+            p->qrange = false; // true; // the code uses it, but it's disturbing to have qmin/qmax with CRF
+            p->interGOP = true;
+            p->interB = true;
+        } else if (codecShortName == "h264_nvenc") {
+            // libx264.c
+            // https://trac.ffmpeg.org/wiki/Encode/H.264
+            p->crf = true;
+            p->x26xSpeed = true;
+            p->bitrate = true;
+            p->bitrateTol = false;
+            p->qscale = true;
+            p->qrange = false; // true; // the code uses it, but it's disturbing to have qmin/qmax with CRF
+            p->interGOP = true;
+            p->interB = true;
         } else if (codecShortName == "libx265") {
             // libx265.c
             // https://trac.ffmpeg.org/wiki/Encode/H.265
@@ -2310,6 +2380,28 @@ WriteFFmpegPlugin::GetCodecSupportedParams(const AVCodec* codec,
             p->bitrate = true;
             p->bitrateTol = false;
             p->qscale = false;
+            p->qrange = false;
+            p->interGOP = false;
+            p->interB = false;
+        } else if (codecShortName == "hevc_vaapi") {
+            // libx265.c
+            // https://trac.ffmpeg.org/wiki/Encode/H.265
+            p->crf = true;
+            p->x26xSpeed = true;
+            p->bitrate = true;
+            p->bitrateTol = false;
+            p->qscale = true;
+            p->qrange = false;
+            p->interGOP = false;
+            p->interB = false;
+        } else if (codecShortName == "hevc_nvenc") {
+            // libx265.c
+            // https://trac.ffmpeg.org/wiki/Encode/H.265
+            p->crf = true;
+            p->x26xSpeed = true;
+            p->bitrate = true;
+            p->bitrateTol = false;
+            p->qscale = true;
             p->qrange = false;
             p->interGOP = false;
             p->interB = false;
@@ -2339,6 +2431,17 @@ WriteFFmpegPlugin::GetCodecSupportedParams(const AVCodec* codec,
             // https://www.mankier.com/1/ffmpeg-codecs#Video_Encoders-mpeg2
             p->crf = false;
             p->x26xSpeed = false;
+            p->bitrate = false;//true; // disable this in favor of qscale, as for mpeg4
+            p->bitrateTol = false;//true;
+            p->qscale = true;
+            p->qrange = true;
+            p->interGOP = true;
+            p->interB = true;
+        } else if (codecShortName == "mpeg2_vaapi") {
+            // mpeg12enc.c and mpegvideo_enc.c
+            // https://www.mankier.com/1/ffmpeg-codecs#Video_Encoders-mpeg2
+            p->crf = true;
+            p->x26xSpeed = true;
             p->bitrate = false;//true; // disable this in favor of qscale, as for mpeg4
             p->bitrateTol = false;//true;
             p->qscale = true;
@@ -2435,6 +2538,15 @@ WriteFFmpegPlugin::GetCodecSupportedParams(const AVCodec* codec,
             p->qrange = false;
             p->interGOP = false;
             p->interB = false;
+        } else if (codecShortName == "mjpeg_vaapi") {
+            p->crf = false;
+            p->x26xSpeed = false;
+            p->bitrate = false;
+            p->bitrateTol = false;
+            p->qscale = true;
+            p->qrange = false;
+            p->interGOP = false;
+            p->interB = false;
         } else if (codecShortName == "jpeg2000") {
             // j2kenc.c
             p->crf = false;
@@ -2478,6 +2590,17 @@ WriteFFmpegPlugin::GetCodecSupportedParams(const AVCodec* codec,
             p->qrange = false; // true; // the code uses it, but it's disturbing to have qmin/qmax with CRF
             p->interGOP = true;
             p->interB = false;
+        } else if (codecShortName == "vp8_vaapi") {
+            // https://trac.ffmpeg.org/wiki/Encode/VP8
+            // https://www.mankier.com/1/ffmpeg-codecs#Video_Encoders-libvpx
+            p->crf = true;
+            p->x26xSpeed = false;
+            p->bitrate = true;
+            p->bitrateTol = false;
+            p->qscale = false;
+            p->qrange = false; // true; // the code uses it, but it's disturbing to have qmin/qmax with CRF
+            p->interGOP = true;
+            p->interB = false;
         } else if (codecShortName == "libvpx-vp9") {
             // https://trac.ffmpeg.org/wiki/Encode/VP9
             // https://www.mankier.com/1/ffmpeg-codecs#Video_Encoders-libvpx
@@ -2486,6 +2609,17 @@ WriteFFmpegPlugin::GetCodecSupportedParams(const AVCodec* codec,
             p->bitrate = true;
             p->bitrateTol = false;
             p->qscale = false;
+            p->qrange = false; // true; // the code uses it, but it's disturbing to have qmin/qmax with CRF
+            p->interGOP = true;
+            p->interB = false;
+        } else if (codecShortName == "vp9_vaapi") {
+            // https://trac.ffmpeg.org/wiki/Encode/VP8
+            // https://www.mankier.com/1/ffmpeg-codecs#Video_Encoders-libvpx
+            p->crf = true;
+            p->x26xSpeed = true;
+            p->bitrate = true;
+            p->bitrateTol = false;
+            p->qscale = true;
             p->qrange = false; // true; // the code uses it, but it's disturbing to have qmin/qmax with CRF
             p->interGOP = true;
             p->interB = false;
@@ -2575,6 +2709,7 @@ void
 WriteFFmpegPlugin::configureVideoStream(AVCodec* avCodec,
                                         AVStream* avStream)
 {
+    AVBufferRef *avHWDeviceContext;
     assert(avCodec && avStream && _formatContext);
     if (!avCodec || !avStream || !_formatContext) {
         return;
@@ -2590,6 +2725,24 @@ WriteFFmpegPlugin::configureVideoStream(AVCodec* avCodec,
     }
     avcodec_get_context_defaults3(avCodecContext, avCodec);
     //avCodecContext->strict_std_compliance = FF_COMPLIANCE_STRICT;
+
+    if (avCodec->capabilities & AV_CODEC_CAP_HARDWARE && _hwDeviceContext) {
+#if OFX_FFMPEG_PRINT_CODECS
+        std::cout << "OK avcodec_get_hw_config: " << avCodec->name << std::endl;
+#endif
+        AVHWDeviceContext *hwDeviceCtx = (AVHWDeviceContext*)_hwDeviceContext->data;
+        switch (hwDeviceCtx->type) {
+            case AV_HWDEVICE_TYPE_VAAPI:
+                _hwPixelFormat = AV_PIX_FMT_VAAPI;
+                _swPixelFormat = AV_PIX_FMT_NV12;
+                break;
+            case AV_HWDEVICE_TYPE_CUDA:
+                break;
+        }
+        avCodecContext->hw_device_ctx = av_buffer_ref(_hwDeviceContext);
+        avCodecContext->extra_hw_frames = 64;
+
+    }
 
     //Only update the relevant context variables where the user is able to set them.
     //This deals with cases where values are left on an old value when knob disabled.
@@ -3262,7 +3415,7 @@ WriteFFmpegPlugin::addStream(AVFormatContext* avFormatContext,
                              AVCodec** pavCodec)
 {
     AVStream* avStream = NULL;
-    AVCodec* avCodec = NULL;
+    AVCodec* avCodec = *pavCodec;
 
     // Find the encoder.
 #if OFX_FFMPEG_PRORES
@@ -3271,6 +3424,7 @@ WriteFFmpegPlugin::addStream(AVFormatContext* avFormatContext,
         avCodec = avcodec_find_encoder_by_name(kProresCodec);
     } else
 #endif
+    if (!avCodec)
     {
         avCodec = avcodec_find_encoder(avCodecId);
     }
@@ -3346,6 +3500,7 @@ WriteFFmpegPlugin::openCodec(AVFormatContext* avFormatContext,
             return -1;
         }
     } else if (AVMEDIA_TYPE_VIDEO == avCodecContext->codec_type) {
+        int ret = setHWFrameContext(avCodecContext);
         int error = avcodec_open2(avCodecContext, avCodec, NULL);
         if (error < 0) {
             // Report the error.
@@ -3568,6 +3723,47 @@ WriteFFmpegPlugin::numberOfDestChannels() const
     return alphaEnabled() ? 4 : 3;
 }
 
+int
+WriteFFmpegPlugin::setHWFrameContext(AVCodecContext *ctx)
+{
+    AVBufferRef *hw_frames_ref;
+    AVHWFramesContext *frames_ctx = NULL;
+    AVHWDeviceContext *av_hw_device_ctx = (AVHWDeviceContext*)ctx->hw_device_ctx->data;
+    int err = 0;
+
+    if (ctx->codec->capabilities & AV_CODEC_CAP_HARDWARE) {
+        if (!(hw_frames_ref = av_hwframe_ctx_alloc(ctx->hw_device_ctx))) {
+            return -1;
+        }
+        frames_ctx = (AVHWFramesContext *)(hw_frames_ref->data);
+        switch (av_hw_device_ctx->type) {
+            case AV_HWDEVICE_TYPE_VAAPI:
+                frames_ctx->format    = AV_PIX_FMT_VAAPI;
+                frames_ctx->sw_format = AV_PIX_FMT_NV12;
+                break;
+            case AV_HWDEVICE_TYPE_CUDA:
+                frames_ctx->format    = AV_PIX_FMT_CUDA;
+                frames_ctx->sw_format = AV_PIX_FMT_NV12;
+                break;
+        }
+        frames_ctx->width     = ctx->width;
+        frames_ctx->height    = ctx->height;
+        frames_ctx->initial_pool_size = 64 + ctx->extra_hw_frames;
+        if ((err = av_hwframe_ctx_init(hw_frames_ref)) < 0) {
+            av_buffer_unref(&hw_frames_ref);
+            return err;
+        }
+        ctx->hw_frames_ctx = av_buffer_ref(hw_frames_ref);
+        av_buffer_unref(&hw_frames_ref);
+        if (!ctx->hw_frames_ctx)
+            err = AVERROR(ENOMEM);
+
+        return err;
+    }
+    return 0;
+}
+
+
 ////////////////////////////////////////////////////////////////////////////////
 // writeVideo
 //
@@ -3619,10 +3815,14 @@ WriteFFmpegPlugin::writeVideo(AVFormatContext* avFormatContext,
     // Create another buffer to convert from either 16-bit or 8-bit RGB
     // to the input pixel format required by the encoder.
     AVPixelFormat pixelFormatCodec = avCodecContext->pix_fmt;
+    if (avCodecContext->codec->capabilities & AV_CODEC_CAP_HARDWARE && _hwDeviceContext)
+        pixelFormatCodec = _swPixelFormat;
     int width = _rodPixel.x2 - _rodPixel.x1;
     int height = _rodPixel.y2 - _rodPixel.y1;
     MyAVPicture avPicture;
     AVFrame* avFrame = NULL;
+    AVFrame* avFrame0 = NULL;
+    AVFrame* avHWFrame = NULL;
 
     if (!flush) {
         assert(pixelData && bounds);
@@ -3683,7 +3883,7 @@ WriteFFmpegPlugin::writeVideo(AVFormatContext* avFormatContext,
                 }
             }
 
-            avFrame = av_frame_alloc(); // Create an AVFrame structure and initialise to zero.
+            avFrame = avFrame0 = av_frame_alloc(); // Create an AVFrame structure and initialise to zero.
             assert(avFrame);
             if (!avFrame) {
                 ret = -1;
@@ -3707,6 +3907,13 @@ WriteFFmpegPlugin::writeVideo(AVFormatContext* avFormatContext,
                     // MJPEG ignores global_quality, and only uses the quality setting in the pictures.
                     avFrame->quality = avCodecContext->global_quality;
                     avFrame->pict_type = AV_PICTURE_TYPE_NONE;
+                    if (avCodecContext->codec->capabilities & AV_CODEC_CAP_HARDWARE) {
+                        avHWFrame = av_frame_alloc(); // Create an hardware AVFrame structure and initialise to zero.
+                        assert(avHWFrame);
+                        ret = av_hwframe_get_buffer(avCodecContext->hw_frames_ctx, avHWFrame, 0);
+                        ret = av_hwframe_transfer_data(avHWFrame, avFrame, 0);
+                        avFrame = avHWFrame;
+                    }
                 } else {
                     // av_image_alloc failed.
                     ret = -1;
@@ -3762,8 +3969,28 @@ WriteFFmpegPlugin::writeVideo(AVFormatContext* avFormatContext,
             // appropriate pixel format for the encoder prior to calling this method as
             // this method does NOT perform an pixel format conversion, e.g. through using
             // Sws_xxx.
+retry:
             int got_packet = 0;
-            int encodeResult = avcodec_encode_video2(avCodecContext, &pkt, avFrame, &got_packet);
+            int encodeResult = 0;
+            int retry_frame = 0;
+#if OFX_FFMPEG_NEW_API
+            encodeResult = avcodec_send_frame(avCodecContext, avFrame);
+            if ( encodeResult == 0 || encodeResult == AVERROR(EAGAIN) ) {
+                retry_frame = encodeResult == AVERROR(EAGAIN) ? 1 : 0;
+                encodeResult = avcodec_receive_packet(avCodecContext, &pkt);
+            }
+            if ( encodeResult == AVERROR(EAGAIN) || encodeResult == AVERROR_EOF ) {
+                got_packet = 0;
+                encodeResult = 0;
+            } else
+            if (encodeResult < 0) {
+                got_packet = 0;
+            } else {
+                got_packet = 1;
+            }
+#else
+            encodeResult = avcodec_encode_video2(avCodecContext, &pkt, avFrame, &got_packet);
+#endif
             // coded_frame is deprecated
             // see https://ffmpeg.org/pipermail/ffmpeg-cvslog/2015-July/092046.html
             //if (avCodecContext->coded_frame && !ret && got_packet) {
@@ -3804,6 +4031,8 @@ WriteFFmpegPlugin::writeVideo(AVFormatContext* avFormatContext,
                     }
                 }
             }
+            if (retry_frame)
+                goto retry;
             av_packet_unref(&pkt); // av_free_packet(&pkt);
         }
         if (error) {
@@ -3816,12 +4045,14 @@ WriteFFmpegPlugin::writeVideo(AVFormatContext* avFormatContext,
     // same as the output buffer address, assume that
     // an intermediate buffer was allocated above and
     // must now be released.
-    if (avFrame) {
-        if (avFrame->data[0] != avPicture.data[0]) {
-            av_freep(avFrame->data);
+    if (avFrame0) {
+        if (avFrame0->data[0] != avPicture.data[0]) {
+            av_freep(avFrame0->data);
         }
-        av_frame_free(&avFrame);
+        av_frame_free(&avFrame0);
     }
+    if (avHWFrame)
+        av_frame_free(&avHWFrame);
 
     return ret;
 } // WriteFFmpegPlugin::writeVideo
@@ -4098,6 +4329,9 @@ WriteFFmpegPlugin::beginEncode(const string& filename,
     AVPixelFormat targetPixelFormat     = AV_PIX_FMT_YUV422P;
     AVPixelFormat rgbBufferPixelFormat = AV_PIX_FMT_RGB24;
     getPixelFormats(videoCodec, pixelCoding, bitdepth, alpha, rgbBufferPixelFormat, targetPixelFormat);
+#if OFX_FFMPEG_PRINT_CODECS
+    std::cout << "targetPixelFormat: " << av_pix_fmt_desc_get(targetPixelFormat)->name << std::endl;
+#endif
     assert(!_streamVideo);
     if (!_streamVideo) {
         _streamVideo = addStream(_formatContext, codecId, &videoCodec);
@@ -4110,6 +4344,11 @@ WriteFFmpegPlugin::beginEncode(const string& filename,
 
         AVCodecContext* avCodecContext = _streamVideo->codec;
         avCodecContext->pix_fmt = targetPixelFormat;
+        if (avCodecContext->codec->capabilities & AV_CODEC_CAP_HARDWARE)
+            avCodecContext->pix_fmt = _hwPixelFormat;
+#if OFX_FFMPEG_PRINT_CODECS
+        std::cout << "AVCodecContext: " << av_pix_fmt_desc_get(avCodecContext->pix_fmt)->name << std::endl;
+#endif
 
 #if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(51, 63, 100) // https://ffmpeg.org/pipermail/ffmpeg-cvslog/2015-October/094884.html
         std::size_t picSize = av_image_get_buffer_size(targetPixelFormat,
@@ -4866,6 +5105,9 @@ WriteFFmpegPlugin::updatePixelFormat()
     freeFormat();
 
     const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(targetPixelFormat);
+#if OFX_FFMPEG_PRINT_CODECS
+    std::cout << "targetPixelFormat: " << desc->name << std::endl;
+#endif
     _infoPixelFormat->setValue(desc ? pix_fmt_name_canonical(desc->name) : "unknown");
     _infoBitDepth->setValue(FFmpeg::pixelFormatBitDepth(targetPixelFormat));
     _infoBPP->setValue(FFmpeg::pixelFormatBPP(targetPixelFormat));
@@ -5196,6 +5438,10 @@ WriteFFmpegPlugin::freeFormat()
     if (_convertCtx) {
         sws_freeContext(_convertCtx);
         _convertCtx = NULL;
+    }
+    if (_hwDeviceContext) {
+        av_buffer_unref(&_hwDeviceContext);
+        _hwDeviceContext = NULL;
     }
     {
         tthread::lock_guard<tthread::mutex> guard(_nextFrameToEncodeMutex);

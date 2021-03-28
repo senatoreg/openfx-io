@@ -203,6 +203,9 @@ const FilterEntry kCodecWhitelist[] =
     { "gif",            true,  true },     // GIF (Graphics Interchange Format) - write not supported as 8-bit only.
     { "h263p",          true,  true },     // H.263+ / H.263-1998 / H.263 version 2
     { "h264",           true,  false },     // H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (the encoder is libx264)
+    { "h264_vaapi",     false, true },     // H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (the encoder is h264_vaapi)
+    { "h264_nvenc",     false, true },     // H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (the encoder is h264_vaapi)
+    { "h264_cuvid",     true,  false },    // H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (the encoder is h264_cuvid)
     { "hap",            true,  true },     // Vidvox Hap
     { "hevc",           true,  false },     // H.265 / HEVC (High Efficiency Video Coding) (the encoder is libx265)
     { "huffyuv",        true,  UNSAFEQT0 && UNSAFEVLC },     // HuffYUV - write not supported as not official qt readable.
@@ -213,17 +216,27 @@ const FilterEntry kCodecWhitelist[] =
     { "libschroedinger", true,  UNSAFEQT0 && UNSAFEVLC },     // libschroedinger Dirac - write untested. VLC plays with a wrong format
     { "libtheora",      true,  UNSAFEQT0 },     // libtheora Theora - write untested.
     { "libvpx",         true,  UNSAFEQT0 },     // On2 VP8
+    { "vp8_vaapi",      false, true },          // On2 VP8
     { "libvpx-vp9",     true,  UNSAFEQT0 },     // Google VP9
+    { "vp9_vaapi",      false, true },          // Google VP9
     { "libx264",        true,  UNSAFEQT0 },     // H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (encoder)
     { "libx264rgb",     true,  UNSAFEQT0 },     // H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 RGB (encoder)
     { "libx265",        true,  UNSAFEQT0 },     // H.265 / HEVC (High Efficiency Video Coding) (encoder) - resizes the image
+    { "hevc_vaapi",     false, true },          // H.265 / HEVC (High Efficiency Video Coding) (encoder)
+    { "hevc_nvenc",     false, true },          // H.265 / HEVC (High Efficiency Video Coding) (encoder)
+    { "hevc_cuvid",     true,  false },         // H.265 / HEVC (High Efficiency Video Coding) (encoder)
     { "libxavs",        true,  false },         // Chinese AVS (Audio Video Standard) (encoder) - untested
     { "libxvid",        true,  true },     // MPEG-4 part 2
     { "ljpeg",          true,  UNSAFEQT0 },     // Lossless JPEG - write not supported as can't be read in in official qt.
     { "mjpeg",          true,  true },     // MJPEG (Motion JPEG) - this looks to be MJPEG-A. MJPEG-B encoding is not supported by FFmpeg so is not included here. To avoid confusion over the MJPEG-A and MJPEG-B variants, this codec is displayed as 'Photo JPEG'. This is done to i) avoid the confusion of the naming, ii) be consistent with Apple QuickTime, iii) the term 'Photo JPEG' is recommend for progressive frames which is appropriate to Nuke/NukeStudio as it does not have interlaced support.
+    { "mjpeg_cuvid",    true,  false },    // MJPEG (Motion JPEG) - this looks to be MJPEG-A. MJPEG-B encoding is not supported by FFmpeg so is not included here. To avoid confusion over the MJPEG-A and MJPEG-B variants, this codec is displayed as 'Photo JPEG'. This is done to i) avoid the confusion of the naming, ii) be consistent with Apple QuickTime, iii) the term 'Photo JPEG' is recommend for progressive frames which is appropriate to Nuke/NukeStudio as it does not have interlaced support.
+    { "mpeg2_vaapi",    false, true },     // MPEG-2 video
+    { "mpeg2_cuvid",    true,  false },    // MPEG-2 video
     { "mpeg1video",     true,  TERRIBLE },     // MPEG-1 video - write not supported as it gives random 8x8 blocky errors
+    { "mpeg1_cuvid",    true,  false },     // MPEG-1 video - write not supported as it gives random 8x8 blocky errors
     { "mpeg2video",     true,  true },     // MPEG-2 video
     { "mpeg4",          true,  true },     // MPEG-4 part 2
+    { "mpeg4_cuvid",    true,  false },     // MPEG-4 part 2
     { "msmpeg4v2",      true,  UNSAFEQT0 },     // MPEG-4 part 2 Microsoft variant version 2 - write not supported as doesn't read in official qt.
     { "msmpeg4",        true,  UNSAFEQT0 },     // MPEG-4 part 2 Microsoft variant version 3 - write not supported as doesn't read in official qt.
     { "png",            true,  true },     // PNG (Portable Network Graphics) image
@@ -242,7 +255,9 @@ const FilterEntry kCodecWhitelist[] =
     { "v410",           true,  UNSAFEQT0 && UNSAFEVLC },     // Uncompressed 4:4:4 10-bit - write not supported as not official qt readable with standard codecs.
     { "vc2",            true,  UNSAFEQT0 && UNSAFEVLC },     // SMPTE VC-2 (previously BBC Dirac Pro).
     { "vp8",            true,  false },     // On2 VP8 (decoder)
+    { "vp8_cuvid",      true,  false },     // On2 VP8 (decoder)
     { "vp9",            true,  false },     // Google VP9 (decoder)
+    { "vp9_cuvid",      true,  false },     // Google VP9 (decoder)
 
     // Audio codecs.
     { "pcm_alaw",       true,  true },     // PCM A-law / G.711 A-law
@@ -306,6 +321,88 @@ getEntry(const char* name,
 
     return NULL;
 }
+
+static AVPixelFormat
+getFormat(AVCodecContext *avctx,
+          const enum AVPixelFormat *pix_fmts)
+{
+#if TRACE_DECODE_PROCESS
+    std::cout << "Looking up surface format in getFormat(): ";
+#endif
+    int ret = 0;
+    const enum AVPixelFormat *p, *s;
+    HWCodecContext *hw_decode_ctx = (HWCodecContext*)avctx->opaque;
+
+    AVHWFramesContext  *frames_ctx;
+    AVVAAPIFramesContext *frames_hwctx;
+    AVBufferRef *hw_frames_buffer_ref;
+    // AVHWFramesConstraints *hw_frames_constraints;
+
+    // hw_frames_constraints = av_hwdevice_get_hwframe_constraints(hw_decode_ctx->_avHWDeviceContext, hw_decode_ctx->_avHWCodecConfig);
+
+    for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+        if (*p == hw_decode_ctx->_avHWCodecConfig->pix_fmt) {
+#if TRACE_DECODE_PROCESS
+            std::cout << av_pix_fmt_desc_get(*p)->name << " pixel format found." << std::endl;
+#endif
+            /*
+            if ((hw_frames_buffer_ref = av_hwframe_ctx_alloc(hw_decode_ctx->_avHWDeviceContext)) != NULL) {
+                avctx->hw_frames_ctx = av_buffer_ref(hw_frames_buffer_ref);
+
+                frames_ctx   = (AVHWFramesContext*)avctx->hw_frames_ctx->data;
+
+                // frames_ctx->width             = FFALIGN(avctx->coded_width,  16);
+                // frames_ctx->height            = FFALIGN(avctx->coded_height, 16);
+                frames_ctx->width             = avctx->coded_width;
+                frames_ctx->height            = avctx->coded_height;
+                frames_ctx->format            = *p;
+             */
+            /*
+                 * Forced NV12 since intel media sdk return only this format
+                 * Inquery valid_sw_format through av_hwdevice_get_hwframe_constraints actually may fail
+                 * see: https://github.com/intel/media-driver/blob/intel-media-21.1.2/media_driver/linux/common/codec/ddi/media_ddi_decode_base.cpp#L621
+                 */
+                /*
+                if (hw_decode_ctx->_avHWCodecConfig->device_type == AV_HWDEVICE_TYPE_VAAPI)
+                    frames_ctx->sw_format         = AV_PIX_FMT_NV12;
+                else
+                    frames_ctx->sw_format         = avctx->sw_pix_fmt;
+
+                // frames_ctx->initial_pool_size = 128 + avctx->extra_hw_frames;
+                frames_ctx->initial_pool_size = 32;
+#if TRACE_DECODE_PROCESS
+                std::cout << "      HW Frames Context Pool:" << std::endl;
+                std::cout << "            width:" << frames_ctx->width << std::endl;
+                std::cout << "            height:" << frames_ctx->height << std::endl;
+                std::cout << "            format:" << av_pix_fmt_desc_get(frames_ctx->format)->name << std::endl;
+                std::cout << "            swformat:" << av_pix_fmt_desc_get(frames_ctx->sw_format)->name << std::endl;
+                std::cout << "            initial pool size:" << frames_ctx->initial_pool_size << std::endl;
+#endif
+
+                ret = av_hwframe_ctx_init(avctx->hw_frames_ctx);
+#if TRACE_DECODE_PROCESS
+                if (ret < 0) {
+                    std::cout << "      Cannot initialize Hardware frames pool." << std::endl;
+                }
+#endif
+                av_buffer_unref(&hw_frames_buffer_ref);
+            }
+             */
+
+            return *p;
+        }
+    }
+
+#if TRACE_DECODE_PROCESS
+    std::cout << "failed to get pixel format." << std::endl;
+#endif
+    /*
+    if (hw_frames_constraints)
+        av_hwframe_constraints_free(&hw_frames_constraints);
+    */
+
+    return AV_PIX_FMT_NONE;
+}
 } // namespace {
 
 bool
@@ -338,6 +435,265 @@ FFmpegFile::isCodecWhitelistedForWriting(const char* codecName)
     const FilterEntry* whitelistEntry = getEntry(codecName, kCodecWhitelist);
 
     return (whitelistEntry && whitelistEntry->enableWriter);
+}
+
+int
+FFmpegFile::Stream::hwAccelRetrieveData()
+{
+    AVCodecContext *avctx = _codecContext;
+    AVFrame *input = _avFrame;
+    AVFrame *output = NULL;
+    int err;
+
+    output = av_frame_alloc();
+    if (!output)
+        return AVERROR(ENOMEM);
+
+    // output->format = _outputPixelFormat;
+
+    err = av_hwframe_transfer_data(output, input, 0);
+    if (err < 0) {
+        av_log(avctx, AV_LOG_ERROR, "Failed to transfer data to "
+               "output frame: %d.\n", err);
+        goto fail;
+    }
+
+    err = av_frame_copy_props(output, input);
+    if (err < 0) {
+        av_frame_unref(output);
+        goto fail;
+    }
+
+    av_frame_unref(input);
+    av_frame_move_ref(input, output);
+    _avHWFrame = input;
+    av_frame_free(&output);
+
+    return 0;
+
+fail:
+    av_frame_free(&output);
+    return err;
+}
+
+int
+FFmpegFile::Stream::sendFrameToAVHWFilter() {
+    int ret = 0;
+    int need_reinit = 0;
+    AVFrame *avInFrame = _avHWFrame;
+    AVFrame *avOutFrame = _avFrame;
+    AVCodecContext* avctx = _codecContext;
+    AVHWInputFilter* av_hw_input_filter = _hwCodecContext->_avHWInputFilter;
+
+    if (!av_hw_input_filter->_avHWFrameContext ||
+        av_hw_input_filter->_avHWFrameContext != avInFrame->hw_frames_ctx)
+        av_hw_input_filter->_avHWFrameContext = avInFrame->hw_frames_ctx;
+
+    switch (avctx->codec_type) {
+        case AVMEDIA_TYPE_VIDEO:
+            need_reinit |= av_hw_input_filter->_width  != avInFrame->width ||
+                           av_hw_input_filter->_height != avInFrame->height;
+            break;
+    }
+
+    if (!!av_hw_input_filter->_avHWFrameContext != !!avInFrame->hw_frames_ctx ||
+        (av_hw_input_filter->_avHWFrameContext && av_hw_input_filter->_avHWFrameContext->data != avInFrame->hw_frames_ctx->data))
+        need_reinit = 1;
+
+    if (!av_hw_input_filter->_avFilterGraph || need_reinit)
+        ret = initAVHWFilter();
+
+    if (ret < 0)
+        goto end;
+
+    ret = av_buffersrc_add_frame_flags(_hwCodecContext->_avHWInputFilter->_avBufferSrcCtx, avInFrame, AV_BUFFERSRC_FLAG_PUSH);
+    if (ret < 0)
+        goto end;
+
+    ret = av_buffersink_get_frame(_hwCodecContext->_avHWInputFilter->_avBufferSinkCtx, avOutFrame);
+    if (ret < 0)
+        goto end;
+
+end:
+    return ret;
+}
+
+int
+FFmpegFile::Stream::initAVHWFilter() {
+    int ret = 0;
+    char args[512];
+
+    AVFilterGraph *av_filter_graph;
+
+    const AVFilter *av_buffersrc;
+    const AVFilter *av_buffersink;
+
+    AVFilterContext *av_buffersink_ctx;
+    AVFilterContext *av_buffersrc_ctx;
+
+    AVCodecContext* avctx = _codecContext;
+    AVFrame* frame = _avHWFrame;
+
+    AVRational time_base = _avstream->time_base;
+    AVHWFramesContext *av_hw_frames_ctx = (AVHWFramesContext*)avctx->hw_frames_ctx->data;
+    enum AVPixelFormat pix_fmts[] = { _outputPixelFormat, _codecContext->pix_fmt, av_hw_frames_ctx->sw_format, av_hw_frames_ctx->format, AV_PIX_FMT_NONE };
+
+    AVFilterInOut *outputs = avfilter_inout_alloc();
+    AVFilterInOut *inputs  = avfilter_inout_alloc();
+
+    AVHWInputFilter* hw_input_filter = _hwCodecContext->_avHWInputFilter;
+    AVBufferSrcParameters *par;
+
+    if (avctx->codec_type != AVMEDIA_TYPE_VIDEO || !_hwCodecContext->_avHWCodecConfig) {
+#if TRACE_FILE_OPEN
+        std::cout << "Hardware filter not initialized." << std::endl;
+#endif
+         goto end;
+    }
+
+    if (_hwCodecContext->_avHWInputFilter->_avFilterGraph)
+        avfilter_graph_free(&_hwCodecContext->_avHWInputFilter->_avFilterGraph);
+
+    av_filter_graph = avfilter_graph_alloc();
+    if (!outputs || !inputs || !av_filter_graph) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+    av_filter_graph->disable_auto_convert = 1;
+
+    av_buffersrc = avfilter_get_by_name("buffer");
+    av_buffersink = avfilter_get_by_name("buffersink");
+
+    // buffer video source: the decoded frames from the decoder will be inserted here.
+    snprintf(args, sizeof(args),
+             "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=%d/%d",
+             frame->width, frame->height,
+             av_hw_frames_ctx->format, // _hwCodecContext->_avHWCodecConfig->pix_fmt,
+             time_base.num, time_base.den,
+             frame->sample_aspect_ratio.num, frame->sample_aspect_ratio.den);
+
+    ret = avfilter_graph_create_filter(&av_buffersrc_ctx, av_buffersrc, "buffersrc",
+                                       args, NULL, av_filter_graph);
+    if (ret < 0) {
+        av_log(NULL, AV_LOG_ERROR, "Cannot create buffer source\n");
+        goto end;
+    }
+
+    if (hw_input_filter->_avHWFrameContext) {
+        // create buffer parameter
+        par = av_buffersrc_parameters_alloc();
+        if (!par) {
+            ret = AVERROR(ENOMEM);
+            return ret;
+        }
+        memset(par, 0, sizeof(*par));
+        // par->format = AV_PIX_FMT_NONE;
+        // par->format = av_hw_frames_ctx->sw_format;
+        par->format = av_hw_frames_ctx->format;
+
+        par->hw_frames_ctx = hw_input_filter->_avHWFrameContext;
+        ret = av_buffersrc_parameters_set(av_buffersrc_ctx, par);
+        if (ret < 0) {
+            av_log(NULL, AV_LOG_ERROR, "Cannot set input buffer parameters\n");
+            goto end;
+        }
+    }
+
+    // buffer video sink: to terminate the filter chain.
+    ret = avfilter_graph_create_filter(&av_buffersink_ctx, av_buffersink, "buffersink",
+                                       NULL, NULL, av_filter_graph);
+    if (ret < 0) {
+        av_log(NULL, AV_LOG_ERROR, "Cannot create buffer sink\n");
+        goto end;
+    }
+
+    ret = av_opt_set_int_list(av_buffersink_ctx, "pix_fmts", pix_fmts, // &_outputPixelFormat,
+        AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN);
+    if (ret < 0) {
+        av_log(NULL, AV_LOG_ERROR, "Cannot set output pixel format\n");
+        goto end;
+    }
+
+    /*
+     * Set the endpoints for the filter graph. The av_filter_graph will
+     * be linked to the graph described by filters_descr.
+     */
+
+    /*
+     * The buffer source output must be connected to the input pad of
+     * the first filter described by filters_descr; since the first
+     * filter input label is not specified, it is set to "in" by
+     * default.
+     */
+    outputs->name       = av_strdup("in");
+    outputs->filter_ctx = av_buffersrc_ctx;
+    outputs->pad_idx    = 0;
+    outputs->next       = NULL;
+
+    /*
+     * The buffer sink input must be connected to the output pad of
+     * the last filter described by filters_descr; since the last
+     * filter output label is not specified, it is set to "out" by
+     * default.
+     */
+    inputs->name       = av_strdup("out");
+    inputs->filter_ctx = av_buffersink_ctx;
+    inputs->pad_idx    = 0;
+    inputs->next       = NULL;
+
+    if (_hwCodecContext->_avHWCodecConfig->device_type == AV_HWDEVICE_TYPE_VAAPI)
+        snprintf(args, sizeof(args),
+                 "scale_vaapi=w=%d:h=%d:format=%s:mode=512:out_range=2,hwdownload,format=%s",
+                 frame->width, frame->height,
+                 av_pix_fmt_desc_get(av_hw_frames_ctx->sw_format)->name,
+                 av_pix_fmt_desc_get(av_hw_frames_ctx->sw_format)->name); //,
+    else if (_hwCodecContext->_avHWCodecConfig->device_type == AV_HWDEVICE_TYPE_CUDA)
+#if USE_NVIDIA_NPP
+        snprintf(args, sizeof(args),
+                 "scale_npp=w=%d:h=%d:format=%s,hwdownload,format=%s",
+                 _width, _height,
+                 av_pix_fmt_desc_get(av_hw_frames_ctx->sw_format)->name,
+                 av_pix_fmt_desc_get(av_hw_frames_ctx->sw_format)->name);
+#else
+        snprintf(args, sizeof(args),
+                 "scale_cuda=w=%d:h=%d,hwdownload,format=%s",
+                 _width, _height,
+                 av_pix_fmt_desc_get(av_hw_frames_ctx->sw_format)->name);
+#endif
+
+#if TRACE_FILE_OPEN
+    std::cout << "Init Filter: " << args << std::endl;
+#endif
+
+    if ((ret = avfilter_graph_parse_ptr(av_filter_graph, args,
+                                        &inputs, &outputs, NULL)) < 0)
+    // if ((ret = avfilter_graph_parse2(av_filter_graph, args,
+                                     // &inputs, &outputs)) < 0)
+        goto end;
+
+    if (hw_input_filter->_avHWFrameContext) {
+        for (int i = 0 ; i < av_filter_graph->nb_filters; i++) {
+            av_filter_graph->filters[i]->hw_device_ctx =
+                av_buffer_ref(((AVHWFramesContext*)hw_input_filter->_avHWFrameContext->data)->device_ref);
+        }
+    }
+
+    if ((ret = avfilter_graph_config(av_filter_graph, NULL)) < 0)
+        goto end;
+
+    _hwCodecContext->_avHWInputFilter->_avFilterGraph = av_filter_graph;
+    _hwCodecContext->_avHWInputFilter->_width = frame->width;
+    _hwCodecContext->_avHWInputFilter->_height = frame->height;
+    _hwCodecContext->_avHWInputFilter->_avBufferSrc = av_buffersrc;
+    _hwCodecContext->_avHWInputFilter->_avBufferSrcCtx = av_buffersrc_ctx;
+    _hwCodecContext->_avHWInputFilter->_avBufferSink = av_buffersink;
+    _hwCodecContext->_avHWInputFilter->_avBufferSinkCtx = av_buffersink_ctx;
+end:
+    avfilter_inout_free(&inputs);
+    avfilter_inout_free(&outputs);
+    av_freep(&par);
+
+    return ret;
 }
 
 SwsContext*
@@ -752,8 +1108,98 @@ CheckStreamPropertiesMatch(const AVStream* streamA,
     (streamA->r_frame_rate.den  == streamB->r_frame_rate.den);
 }
 
+HWCodecContext *
+FFmpegFile::initAVHWCodecContext(enum AVHWDeviceType av_hw_device_type,
+                                 const char *av_hw_device_name,
+                                 AVCodecContext *avctx,
+                                 AVCodec* videoCodec)
+{
+    // enum AVHWDeviceType av_hw_device_type;
+    const AVCodecHWConfig *av_hw_codec_config;
+    AVHWDeviceContext *av_hw_device_ctx;
+    VAStatus va_status;
+    int ret;
+
+    HWCodecContext *hw_codec_ctx = (HWCodecContext *)malloc(sizeof(HWCodecContext));
+    memset(hw_codec_ctx, 0, sizeof(HWCodecContext));
+    hw_codec_ctx->_avHWDeviceType = AV_HWDEVICE_TYPE_NONE;
+
+    hw_codec_ctx->_avHWInputFilter = (AVHWInputFilter*)malloc(sizeof(AVHWInputFilter));
+    memset(hw_codec_ctx->_avHWInputFilter, 0, sizeof(AVHWInputFilter));
+
+    if (av_hw_device_type == AV_HWDEVICE_TYPE_NONE)
+        return hw_codec_ctx;
+
+    if (avctx->codec_type != AVMEDIA_TYPE_VIDEO) {
+#if TRACE_FILE_OPEN
+        std::cout << "      Hardware filter not initialized for non Video stream." << std::endl;
+#endif
+         return hw_codec_ctx;
+    }
+
+    if (avctx->codec_id != AV_CODEC_ID_H264 && avctx->codec_id != AV_CODEC_ID_HEVC &&
+        avctx->codec_id != AV_CODEC_ID_MJPEG && avctx->codec_id != AV_CODEC_ID_MPEG2VIDEO &&
+        avctx->codec_id != AV_CODEC_ID_VP8 && avctx->codec_id != AV_CODEC_ID_VP9) {
+#if TRACE_FILE_OPEN
+            std::cout << "      Init AV HW Decode Context return AV_HWDEVICE_TYPE_NONE" << std::endl;
+#endif
+            return hw_codec_ctx;
+    }
+
+    // av_hw_device_type = av_hwdevice_find_type_by_name(av_hw_device_type_name);
+#if TRACE_FILE_OPEN
+    if (av_hw_device_type == AV_HWDEVICE_TYPE_NONE) {
+        std::cout << "      Device type vaapi is not supported." << std::endl;
+        std::cout << "      Available device types:" << std::endl;
+        while((av_hw_device_type = av_hwdevice_iterate_types(av_hw_device_type)) != AV_HWDEVICE_TYPE_NONE)
+            std::cout << av_hwdevice_get_type_name(av_hw_device_type) << std::endl;
+    }
+#endif
+
+    for (int c = 0;; c++) {
+        av_hw_codec_config = avcodec_get_hw_config(videoCodec, c);
+        if (!av_hw_codec_config) {
+#if TRACE_FILE_OPEN
+            std::cout << "      Decoder " << videoCodec->name << " does not support device type " << av_hwdevice_get_type_name(av_hw_device_type) << std::endl;
+#endif
+            return hw_codec_ctx;
+        }
+
+         if (av_hw_codec_config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX &&
+             av_hw_codec_config->device_type == av_hw_device_type) {
+#if TRACE_FILE_OPEN
+             std::cout << "      Decoder " << videoCodec->name << " supports device type " << av_hwdevice_get_type_name(av_hw_device_type) << std::endl;
+#endif
+             break;
+         }
+    }
+
+    ret = av_hwdevice_ctx_create(&hw_codec_ctx->_avHWDeviceContext, av_hw_device_type,
+                                 av_hw_device_name, NULL, 0);
+    if (ret < 0) {
+#if TRACE_FILE_OPEN
+        std::cout << "      Cannot open the hardware device" << std::endl;
+#endif
+        return hw_codec_ctx;
+    }
+
+    av_hw_device_ctx = (AVHWDeviceContext *)hw_codec_ctx->_avHWDeviceContext->data;
+
+    hw_codec_ctx->_avHWDeviceType = av_hw_device_type;
+    hw_codec_ctx->_avHWCodecConfig = av_hw_codec_config;
+
+    avctx->hw_device_ctx = av_buffer_ref(hw_codec_ctx->_avHWDeviceContext);
+    avctx->get_format = &getFormat;
+    avctx->extra_hw_frames = 64;
+    avctx->opaque = hw_codec_ctx;
+    av_buffer_unref(&hw_codec_ctx->_avHWDeviceContext);
+
+    return hw_codec_ctx;
+}
+
 // constructor
-FFmpegFile::FFmpegFile(const string & filename)
+//FFmpegFile::FFmpegFile(const string & filename, enum AVHWDeviceType hwDeviceType)
+FFmpegFile::FFmpegFile(const string & filename, const HWInfo *hwInfo)
     : _filename(filename)
     , _context(NULL)
     , _format(NULL)
@@ -771,6 +1217,7 @@ FFmpegFile::FFmpegFile(const string & filename)
     //MultiThread::AutoMutex guard(_lock); // not needed in a constructor: we are the only owner
 #endif
 
+    // av_log_set_level(AV_LOG_VERBOSE);
 #if TRACE_FILE_OPEN
     std::cout << "FFmpeg Reader=" << this << "::c'tor(): filename=" << filename << std::endl;
 #endif
@@ -848,6 +1295,16 @@ FFmpegFile::FFmpegFile(const string & filename)
 #endif
             continue;
         }
+
+#if TRACE_FILE_OPEN
+        std::cout << std::endl;
+#endif
+
+        HWCodecContext *hw_decode_ctx; // = (HWCodecContext *)malloc(sizeof(HWCodecContext));
+#if TRACE_FILE_OPEN
+        std::cout << "HW Device: " << hwInfo->hwDeviceName << std::endl;
+#endif
+        hw_decode_ctx = initAVHWCodecContext(hwInfo->hwDeviceType, hwInfo->hwDeviceName, avctx, videoCodec);
 
         // skip codecs not in the white list
         //string reason;
@@ -928,7 +1385,14 @@ FFmpegFile::FFmpegFile(const string & filename)
         stream->_avstream = avstream;
         stream->_codecContext = avctx;
         stream->_videoCodec = videoCodec;
+        stream->_hwCodecContext = hw_decode_ctx;
         stream->_avFrame = av_frame_alloc(); // avcodec_alloc_frame();
+        if (hw_decode_ctx->_avHWDeviceType != AV_HWDEVICE_TYPE_NONE) {
+#if TRACE_FILE_OPEN
+            std::cout << "      Decoder is hardware accelerated" << std::endl;
+#endif
+            stream->_avHWFrame = av_frame_alloc(); // avcodec_alloc_frame();
+        }
         {
             // In |engine| the output bit depth was hard coded to 16-bits.
             // Now it will use the bit depth reported by the decoder so
@@ -1047,6 +1511,8 @@ FFmpegFile::~FFmpegFile()
     if (_context) {
         avformat_close_input(&_context);
         av_free(_context);
+        if (_selectedStream->_hwCodecContext->_avHWDeviceContext)
+            av_buffer_unref(&_selectedStream->_hwCodecContext->_avHWDeviceContext);
     }
     _filename.clear();
     _errorMsg.clear();
@@ -1215,6 +1681,11 @@ FFmpegFile::decode(const ImageEffect* plugin,
         return false;
     }
     Stream* stream = _selectedStream;
+    AVFrame *decodedFrame;
+    if (stream->_hwCodecContext->_avHWDeviceType != AV_HWDEVICE_TYPE_NONE)
+        decodedFrame = stream->_avHWFrame;
+    else
+        decodedFrame = stream->_avFrame;
 
     // Translate from the 1-based frames expected to 0-based frame offsets for use in the rest of this code.
     int originalFrame = frame;
@@ -1535,7 +2006,7 @@ FFmpegFile::decode(const ImageEffect* plugin,
 #if USE_NEW_FFMPEG_API
                         error = avcodec_send_packet(stream->_codecContext, &_avPacket);
                         if (error == 0) {
-                            error = avcodec_receive_frame(stream->_codecContext, stream->_avFrame);
+                            error = avcodec_receive_frame(stream->_codecContext, decodedFrame);
                             if ( error == AVERROR(EAGAIN) ) {
                                 frameDecoded = 0;
                                 error = 0;
@@ -1592,7 +2063,7 @@ FFmpegFile::decode(const ImageEffect* plugin,
 #if USE_NEW_FFMPEG_API
                 error = avcodec_send_packet(stream->_codecContext, &emptyAVPacket);
                 if (error == 0) {
-                    error = avcodec_receive_frame(stream->_codecContext, stream->_avFrame);
+                    error = avcodec_receive_frame(stream->_codecContext, decodedFrame);
                     if ( error == AVERROR(EAGAIN) ) {
                         frameDecoded = 0;
                         error = 0;
@@ -1631,6 +2102,16 @@ FFmpegFile::decode(const ImageEffect* plugin,
                 std::cout << ", is desired frame" << std::endl;
 #endif
 
+                int error;
+                if (av_pix_fmt_desc_get((enum AVPixelFormat)decodedFrame->format)->flags & AV_PIX_FMT_FLAG_HWACCEL) {
+                    error = stream->sendFrameToAVHWFilter();
+                    if (error < 0) {
+                        setInternalError(error, "FFmpeg Reader failed to send hardware frame to filter: ");
+                    }
+                    // error = stream->hwAccelRetrieveData();
+                    srcPixelFormat = (enum AVPixelFormat)stream->_avFrame->format;
+                    decodedFrame = stream->_avFrame;
+                }
                 SwsContext* context = NULL;
                 {
                     context = stream->getConvertCtx(srcPixelFormat, stream->_width, stream->_height,
@@ -1662,8 +2143,8 @@ FFmpegFile::decode(const ImageEffect* plugin,
                     av_image_fill_arrays(data, linesize, buffer, stream->_outputPixelFormat, stream->_width, stream->_height, 1);
 #endif
                     sws_scale(context,
-                              stream->_avFrame->data,
-                              stream->_avFrame->linesize,
+                              decodedFrame->data,
+                              decodedFrame->linesize,
                               0,
                               stream->_height,
                               data,
@@ -1899,7 +2380,8 @@ FFmpegFileManager::get(void const * plugin,
 
 FFmpegFile*
 FFmpegFileManager::getOrCreate(void const * plugin,
-                               const string &filename) const
+                               const string &filename,
+                               struct HWInfo *hwInfo) const
 {
     if (filename.empty() || !plugin) {
         return 0;
@@ -1921,7 +2403,7 @@ FFmpegFileManager::getOrCreate(void const * plugin,
         }
     }
 
-    FFmpegFile* file = new FFmpegFile(filename);
+    FFmpegFile* file = new FFmpegFile(filename, hwInfo);
     if ( found == _files.end() ) {
         std::list<FFmpegFile*> fileList;
         fileList.push_back(file);

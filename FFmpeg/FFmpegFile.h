@@ -44,10 +44,15 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavformat/avio.h>
 #include <libavcodec/avcodec.h>
+#include "libavutil/hwcontext.h"
+#include "libavutil/hwcontext_vaapi.h"
 #include <libavutil/opt.h>
 #include <libswscale/swscale.h>
 #include <libavutil/avutil.h>
 #include <libavutil/error.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
+#include <libavutil/opt.h>
 }
 #include "FFmpegCompat.h"
 
@@ -99,6 +104,35 @@ namespace OFX {
 class ImageEffect;
 }
 
+typedef struct HWInfo {
+    enum AVHWDeviceType hwDeviceType;
+    char* hwDeviceName;
+} HWInfo;
+
+typedef struct AVHWInputFilter {
+    AVFilterGraph* _avFilterGraph;
+    AVBufferRef* _avHWFrameContext;
+
+    int _width, _height;
+
+    const AVFilter* _avBufferSrc;
+    AVFilterContext* _avBufferSrcCtx;
+
+    const AVFilter* _avBufferSink;
+    AVFilterContext* _avBufferSinkCtx;
+} AVHWInputFilter;
+
+typedef struct HWCodecContext {
+    /* FFMpeg data */
+    enum AVHWDeviceType _avHWDeviceType;
+    const AVCodecHWConfig* _avHWCodecConfig;
+    AVBufferRef* _avHWDeviceContext;
+    AVHWInputFilter* _avHWInputFilter;
+
+    /* Hardware specific data */
+    void* _hwAccelConfig;
+} HWCodecContext;
+
 class FFmpegFile
 {
 public:
@@ -118,6 +152,8 @@ private:
         AVCodecContext* _codecContext; // video codec context
         AVCodec* _videoCodec;
         AVFrame* _avFrame;             // decoding frame
+        AVFrame* _avHWFrame;           // hardware decoding frame
+        HWCodecContext *_hwCodecContext;
         SwsContext* _convertCtx;
         bool _resetConvertCtx;
 
@@ -158,6 +194,8 @@ private:
             , _codecContext(NULL)
             , _videoCodec(NULL)
             , _avFrame(NULL)
+            , _avHWFrame(NULL)
+            , _hwCodecContext(NULL)
             , _convertCtx(NULL)
             , _resetConvertCtx(true)
             , _fpsNum(1)
@@ -205,6 +243,20 @@ private:
 
             if (_convertCtx) {
                 sws_freeContext(_convertCtx);
+            }
+
+            if (_avHWFrame) {
+                av_free(_avHWFrame);
+            }
+
+            if (_hwCodecContext) {
+               if (_hwCodecContext->_avHWInputFilter) {
+                   if (_hwCodecContext->_avHWInputFilter->_avFilterGraph)
+                       avfilter_graph_free(&_hwCodecContext->_avHWInputFilter->_avFilterGraph);
+
+                   free(_hwCodecContext->_avHWInputFilter);
+               }
+               free(_hwCodecContext);
             }
         }
 
@@ -270,6 +322,11 @@ private:
         }
 
         static double GetStreamAspectRatio(Stream* stream);
+
+        int initVAAPIPipeline();
+        int initAVHWFilter();
+        int hwAccelRetrieveData();
+        int sendFrameToAVHWFilter();
 
         // Generate the conversion context used by SoftWareScaler if not already set.
         // |reset| forces recalculation of cached context.
@@ -368,10 +425,13 @@ public:
     //FFmpegFile();
 
     // constructor
-    FFmpegFile(const std::string& filename);
+    FFmpegFile(const std::string& filename, const struct HWInfo *hwInfo);
 
     // destructor
     ~FFmpegFile();
+
+    HWCodecContext *initAVHWCodecContext(enum AVHWDeviceType hw_device_type, const char* hw_device_name,
+                                         AVCodecContext *avctx, AVCodec* videoCodec);
 
     const std::string& getFilename() const
     {
@@ -559,7 +619,7 @@ public:
     void clear(void const * plugin);
 
     FFmpegFile* get(void const * plugin, const std::string &filename) const;
-    FFmpegFile* getOrCreate(void const * plugin, const std::string &filename) const;
+    FFmpegFile* getOrCreate(void const * plugin, const std::string &filename, struct HWInfo *hwInfo) const;
 };
 
 

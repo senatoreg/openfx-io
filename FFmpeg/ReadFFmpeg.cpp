@@ -42,6 +42,7 @@
 #include <cmath>
 #include <sstream>
 #include <algorithm>
+#include <iostream>
 #ifdef DEBUG
 #include <cstdio>
 #define DBG(x) x
@@ -87,6 +88,18 @@ OFXS_NAMESPACE_ANONYMOUS_ENTER
 #define kParamLibraryInfo "libraryInfo"
 #define kParamLibraryInfoLabel "FFmpeg Info...", "Display information about the underlying library."
 
+#define kParamHwAccelEnabled "hwAccelEnabled"
+#define kParamHwAccelEnabledLabelAndHint "Hardware Acceleration", "Enable hardware acceleration to decode video stream."
+
+#define kParamHwAccelType "hwAccelDeviceType"
+#define kParamHwAccelTypeLabelAndHint "Acceleration Type", "Hardware acceleration type to be used."
+#define kParamHwAccelDefaultType "vaapi"
+
+#define kParamHwAccelDeviceName "hwAccelDeviceName"
+#define kParamHwAccelDeviceNameLabel "Acceleration Device"
+#define kParamHwAccelDeviceNameHint "Hardware acceleration device."
+#define kParamHwAccelDefaultDeviceName "/dev/dri/renderD128"
+
 
 #define kSupportsRGBA true
 #define kSupportsRGB true
@@ -101,6 +114,9 @@ class ReadFFmpegPlugin
     FFmpegFileManager& _manager;
     IntParam *_maxRetries;
     BooleanParam *_firstTrackOnly;
+    BooleanParam *_hwAccelEnabled;
+    ChoiceParam *_hwDeviceType;
+    StringParam *_hwDeviceName;
 
 public:
 
@@ -111,6 +127,8 @@ public:
     virtual void changedParam(const InstanceChangedArgs &args, const string &paramName) OVERRIDE FINAL;
 
     bool loadNearestFrame() const;
+
+    struct HWInfo * getHWInfo() const;
 
     /**
      * @brief Restore any state from the parameters set
@@ -158,10 +176,16 @@ ReadFFmpegPlugin::ReadFFmpegPlugin(FFmpegFileManager& manager,
     , _manager(manager)
     , _maxRetries(NULL)
     , _firstTrackOnly(NULL)
+    , _hwAccelEnabled(NULL)
+    , _hwDeviceType(NULL)
+    , _hwDeviceName(NULL)
 {
     _maxRetries = fetchIntParam(kParamMaxRetries);
     _firstTrackOnly = fetchBooleanParam(kParamFirstTrackOnly);
-    assert(_maxRetries && _firstTrackOnly);
+    _hwAccelEnabled = fetchBooleanParam(kParamHwAccelEnabled);
+    _hwDeviceType = fetchChoiceParam(kParamHwAccelType);
+    _hwDeviceName = fetchStringParam(kParamHwAccelDeviceName);
+    assert(_maxRetries && _firstTrackOnly && _hwAccelEnabled && _hwDeviceType && _hwDeviceName);
     int originalFrameRangeMin, originalFrameRangeMax;
     _originalFrameRange->getValue(originalFrameRangeMin, originalFrameRangeMax);
     if (originalFrameRangeMin == 0) {
@@ -188,7 +212,11 @@ void
 ReadFFmpegPlugin::restoreStateFromParams()
 {
     GenericReaderPlugin::restoreStateFromParams();
-    //_manager.getOrCreate(this, filename);
+    //HWInfo *hwInfo = getHWInfo();
+    //_manager.getOrCreate(this, filename, hwInfo);
+    //if (hwInfo->hwDeviceName)
+    //    free(hwInfo->hwDeviceName);
+    //delete hwInfo;
 }
 
 bool
@@ -230,14 +258,67 @@ ffmpeg_versions()
 
     return oss.str();
 }
+// ChoiceParamType may be ChoiceParamDescriptor or ChoiceParam
+template <typename ChoiceParamType>
+static int
+buildHwDeviceTypeChoiceParam(ChoiceParamType* choice)
+{
+    int defaultType = -1;
+    enum AVHWDeviceType type = AV_HWDEVICE_TYPE_NONE;
 
+    while ((type = av_hwdevice_iterate_types(type)) != AV_HWDEVICE_TYPE_NONE) {
+        const char* name = av_hwdevice_get_type_name(type);
+        choice->appendOption(name, name);
+        if (strcmp(name, kParamHwAccelDefaultType) == 0)
+            defaultType = choice->getNOptions() - 1;
+    }
+    return defaultType;
+}
+
+
+struct HWInfo *
+ReadFFmpegPlugin::getHWInfo() const
+{
+    bool hwEnabled = false;
+    int hwDeviceTypeIdx;
+    string hwDeviceTypeName;
+    string hwDeviceName;
+    HWInfo *fileInfo = new HWInfo();
+
+    fileInfo->hwDeviceType = AV_HWDEVICE_TYPE_NONE;
+
+    _hwAccelEnabled->getValue(hwEnabled);
+    if (hwEnabled) {
+        // Getting FFmpeg Hardware device type from string
+        _hwDeviceType->getValue(hwDeviceTypeIdx);
+        _hwDeviceType->getOption(hwDeviceTypeIdx, hwDeviceTypeName);
+        fileInfo->hwDeviceType = av_hwdevice_find_type_by_name(hwDeviceTypeName.c_str());
+
+        // Getting FFmpeg Hardware device name
+        _hwDeviceName->getValue(hwDeviceName);
+        fileInfo->hwDeviceName = strdup(hwDeviceName.c_str());
+    }
+    return fileInfo;
+}
 
 void
 ReadFFmpegPlugin::changedParam(const InstanceChangedArgs &args,
                                const string &paramName)
 {
+    string filename;
+
     if (paramName == kParamLibraryInfo) {
         sendMessage(Message::eMessageMessage, "", ffmpeg_versions());
+    } else if (paramName == kParamHwAccelEnabled ||
+               paramName == kParamHwAccelType ||
+               (paramName == kParamHwAccelDeviceName && args.reason != eChangeTime)) {
+        _fileParam->getValue(filename);
+        _manager.clear(this);
+        HWInfo *hwInfo = getHWInfo();
+        FFmpegFile* file = _manager.getOrCreate(this, filename, hwInfo);
+        if (hwInfo->hwDeviceName)
+            free(hwInfo->hwDeviceName);
+        delete hwInfo;
     } else {
         GenericReaderPlugin::changedParam(args, paramName);
     }
@@ -274,7 +355,11 @@ ReadFFmpegPlugin::guessParamsFromFilename(const string& filename,
     if (!file) {
         //Clear all opened files by this plug-in since the user changed the selected file/sequence
         _manager.clear(this);
-        file = _manager.getOrCreate(this, filename);
+        HWInfo *hwInfo = getHWInfo();
+        file = _manager.getOrCreate(this, filename, hwInfo);
+        if (hwInfo->hwDeviceName)
+            free(hwInfo->hwDeviceName);
+        delete hwInfo;
     }
 
     if ( !file || file->isInvalid() ) {
@@ -340,7 +425,11 @@ ReadFFmpegPlugin::decode(const string& filename,
                          int pixelComponentCount,
                          int rowBytes)
 {
-    FFmpegFile* file = _manager.getOrCreate(this, filename);
+    HWInfo *hwInfo = getHWInfo();
+    FFmpegFile* file = _manager.getOrCreate(this, filename, hwInfo);
+    if (hwInfo->hwDeviceName)
+        free(hwInfo->hwDeviceName);
+    delete hwInfo;
 
     if ( file && file->isInvalid() ) {
         setPersistentMessage( Message::eMessageError, "", file->getError() );
@@ -454,7 +543,11 @@ ReadFFmpegPlugin::getSequenceTimeDomain(const string& filename,
 
     int width, height, frames;
     double ap;
-    FFmpegFile* file = _manager.getOrCreate(this, filename);
+    HWInfo *hwInfo = getHWInfo();
+    FFmpegFile* file = _manager.getOrCreate(this, filename, hwInfo);
+    if (hwInfo->hwDeviceName)
+        free(hwInfo->hwDeviceName);
+    delete hwInfo;
     if ( !file || file->isInvalid() ) {
         range.min = range.max = 0.;
 
@@ -474,7 +567,11 @@ ReadFFmpegPlugin::getFrameRate(const string& filename,
 {
     assert(fps);
 
-    FFmpegFile* file = _manager.getOrCreate(this, filename);
+    HWInfo *hwInfo = getHWInfo();
+    FFmpegFile* file = _manager.getOrCreate(this, filename, hwInfo);
+    if (hwInfo->hwDeviceName)
+        free(hwInfo->hwDeviceName);
+    delete hwInfo;
     if ( !file || file->isInvalid() ) {
         return false;
     }
@@ -496,7 +593,11 @@ ReadFFmpegPlugin::getFrameBounds(const string& filename,
                                  int* tile_height)
 {
     assert(bounds && par);
-    FFmpegFile* file = _manager.getOrCreate(this, filename);
+    HWInfo *hwInfo = getHWInfo();
+    FFmpegFile* file = _manager.getOrCreate(this, filename, hwInfo);
+    if (hwInfo->hwDeviceName)
+        free(hwInfo->hwDeviceName);
+    delete hwInfo;
     if ( !file || file->isInvalid() ) {
         if (error && file) {
             *error = file->getError();
@@ -1017,6 +1118,51 @@ ReadFFmpegPluginFactory::describeInContext(ImageEffectDescriptor &desc,
         param->setAnimates(false);
         param->setDefault(false);
         param->setLayoutHint(eLayoutHintDivider);
+        if (page) {
+            page->addChild(*param);
+        }
+    }
+    {
+        BooleanParamDescriptor *param = desc.defineBooleanParam(kParamHwAccelEnabled);
+        param->setLabelAndHint(kParamHwAccelEnabledLabelAndHint);
+        param->setAnimates(false);
+        param->setDefault(false);
+        param->setEvaluateOnChange(true); // evaluate only when the BooleanParam is changed
+        param->setIsPersistent(true); // don't save/serialize
+        // param->setLayoutHint(eLayoutHintDivider);
+        if (page) {
+            page->addChild(*param);
+        }
+    }
+    {
+        int defaultType;
+        ChoiceParamDescriptor* param = desc.defineChoiceParam(kParamHwAccelType);
+        param->setLabelAndHint(kParamHwAccelTypeLabelAndHint);
+        param->setAnimates(true);
+        param->setEvaluateOnChange(true); // evaluate only when the BooleanParam is changed
+        param->setIsPersistent(true); // don't save/serialize
+        // param->setLayoutHint(eLayoutHintDivider);
+        defaultType = buildHwDeviceTypeChoiceParam(param);
+        if (defaultType >= 0)
+            param->setDefault(defaultType);
+        if (page) {
+            page->addChild(*param);
+        }
+    }
+    {
+        // string defaultDevice(kParamHwAccelDefaultDeviceName);
+        StringParamDescriptor* param = desc.defineStringParam(kParamHwAccelDeviceName);
+        param->setLabelAndHint(kParamHwAccelDeviceNameLabel, kParamHwAccelDeviceNameHint);
+        param->setStringType(eStringTypeFilePath);
+        // param->setDefault(defaultDevice);
+        param->setDefault(kParamHwAccelDefaultDeviceName);
+        param->setFilePathExists(true);
+        param->setScriptName(kParamHwAccelDeviceName);
+        param->setAnimates(true);
+        param->setEvaluateOnChange(true); // evaluate only when the BooleanParam is changed
+        param->setIsPersistent(true); // don't save/serialize
+        param->setLayoutHint(eLayoutHintDivider);
+        desc.addClipPreferencesSlaveParam(*param);
         if (page) {
             page->addChild(*param);
         }
